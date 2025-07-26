@@ -11,7 +11,7 @@ import (
 
 func listProducts(client *shopify.Client) {
 	// Get products
-	products, err := client.Product.List(context.Background(), "")
+	products, err := client.Product.ListAll(context.Background())
 	if err != nil {
 		panic(err)
 	}

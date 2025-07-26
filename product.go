@@ -159,6 +159,13 @@ var productQuery = fmt.Sprintf(`
 					sku						
 				}
 				availableForSale
+				unitPriceMeasurement{
+					measuredType
+					quantityUnit
+					quantityValue
+					referenceUnit
+					referenceValue
+              }
 			}
 		}
 		pageInfo{
@@ -214,6 +221,13 @@ var productBulkQuery = fmt.Sprintf(`
 					sku							
 				}
 				availableForSale
+				unitPriceMeasurement{
+					measuredType
+					quantityUnit
+					quantityValue
+					referenceUnit
+					referenceValue
+				}
 			}
 		}
 	}
