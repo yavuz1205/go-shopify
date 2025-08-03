@@ -82,7 +82,6 @@ type mutationProductCreateMedia struct {
 
 const productBaseQuery = `
 	id
-	legacyResourceId
 	handle
 	options{
 		id
@@ -126,11 +125,27 @@ const productBaseQuery = `
 
 var productQuery = fmt.Sprintf(`
 	%s
+	bundleComponents(first: 100){
+		edges{
+			node{
+				quantity
+				componentProduct{
+					id
+				}
+              componentVariants(first: 100) {
+                edges {
+                  node {
+                    id
+                  }
+                }
+              }
+			}
+		}
+	}
 	variants(first:100, after: $cursor){
 		edges{
 			node{
 				id
-				legacyResourceId
 				title
 				displayName
 				sku
@@ -155,7 +170,6 @@ var productQuery = fmt.Sprintf(`
 				inventoryQuantity
 				inventoryItem{
 					id
-					legacyResourceId	
 					sku						
 				}
 				availableForSale
@@ -180,7 +194,6 @@ var productBulkQuery = fmt.Sprintf(`
 		edges{
 			node{
 				id
-				legacyResourceId
 				namespace
 				key
 				value
@@ -188,11 +201,21 @@ var productBulkQuery = fmt.Sprintf(`
 			}
 		}
 	}
+	bundleComponents{
+		edges{
+			node{
+				__typename
+				quantity
+				componentProduct{
+					id
+				}
+			}
+		}
+	}
 	variants{
 		edges{
 			node{
 				id
-				legacyResourceId
 				title
 				displayName
 				sku
@@ -217,7 +240,6 @@ var productBulkQuery = fmt.Sprintf(`
 				inventoryQuantity
 				inventoryItem{
 					id
-					legacyResourceId
 					sku							
 				}
 				availableForSale
@@ -270,13 +292,24 @@ func (s *ProductServiceOp) List(ctx context.Context, query string) ([]model.Prod
 
 	q = strings.ReplaceAll(q, "$query", query)
 
-	res := []model.Product{}
-	err := s.client.BulkOperation.BulkQuery(ctx, q, &res)
+	baseProducts := []model.Product{}
+	err := s.client.BulkOperation.BulkQuery(ctx, q, &baseProducts)
 	if err != nil {
 		return nil, fmt.Errorf("bulk query: %w", err)
 	}
 
-	return res, nil
+	detailedProducts := make([]model.Product, 0, len(baseProducts))
+	for _, p := range baseProducts {
+		detailedProduct, err := s.Get(ctx, p.ID)
+		if err != nil {
+			return nil, fmt.Errorf("getting detailed product for %s: %w", p.ID, err)
+		}
+		if detailedProduct != nil {
+			detailedProducts = append(detailedProducts, *detailedProduct)
+		}
+	}
+
+	return detailedProducts, nil
 }
 
 func (s *ProductServiceOp) Get(ctx context.Context, id string) (*model.Product, error) {

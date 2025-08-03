@@ -1,13 +1,20 @@
 package main
 
 import (
+	"log"
 	"os"
 
+	"github.com/joho/godotenv"
 	shopify "github.com/r0busta/go-shopify-graphql/v9"
 	graphqlclient "github.com/r0busta/go-shopify-graphql/v9/graphql"
 )
 
 func defaultClient() *shopify.Client {
+	err := godotenv.Load("../.env")
+	if err != nil {
+		log.Fatalf("Error loading .env file: %v", err)
+	}
+
 	if os.Getenv("STORE_API_KEY") == "" || os.Getenv("STORE_PASSWORD") == "" || os.Getenv("STORE_NAME") == "" {
 		panic("Shopify Admin API Key and/or Password (aka access token) and/or store name not set")
 	}

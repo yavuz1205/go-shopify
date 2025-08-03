@@ -263,11 +263,15 @@ func parseBulkQueryResult(resultFilePath string, out interface{}) error {
 		if parentIDNode.LastError() == nil {
 			parentID := parentIDNode.ToString()
 
-			gid := json.Get(line, "id")
-			if gid.LastError() != nil {
-				return fmt.Errorf("The connection type must query the `id` field")
+			gidNode := json.Get(line, "id")
+			if gidNode.LastError() != nil {
+				gidNode = json.Get(line, "__typename")
+				if gidNode.LastError() != nil {
+					return fmt.Errorf("The connection type must query the `id` or `__typename` field")
+				}
 			}
-			edgeType, nodeType, connectionFieldName, err := concludeObjectType(gid.ToString())
+			gid := gidNode.ToString()
+			edgeType, nodeType, connectionFieldName, err := concludeObjectType(gid)
 			if err != nil {
 				return err
 			}
@@ -422,9 +426,23 @@ func attachNestedConnections(connectionSink map[string]interface{}, outSlice ref
 
 			connectionField.Set(connectionValue)
 
-			err := attachNestedConnections(connectionSink, iter.Value().Elem())
-			if err != nil {
-				return fmt.Errorf("error attacing a nested connection: %w", err)
+			edgesSlice := iter.Value().Elem()
+			if edgesSlice.Len() > 0 {
+				firstEdge := edgesSlice.Index(0)
+				if firstEdge.Kind() == reflect.Ptr {
+					firstEdge = firstEdge.Elem()
+				}
+				node := firstEdge.FieldByName("Node")
+				if node.Kind() == reflect.Ptr {
+					node = node.Elem()
+				}
+
+				if node.FieldByName("ID").IsValid() {
+					err := attachNestedConnections(connectionSink, edgesSlice)
+					if err != nil {
+						return fmt.Errorf("error attacing a nested connection: %w", err)
+					}
+				}
 			}
 		}
 	}
@@ -432,12 +450,15 @@ func attachNestedConnections(connectionSink map[string]interface{}, outSlice ref
 	return nil
 }
 
-func concludeObjectType(gid string) (reflect.Type, reflect.Type, string, error) {
-	submatches := gidRegex.FindStringSubmatch(gid)
-	if len(submatches) != 2 {
-		return reflect.TypeOf(nil), reflect.TypeOf(nil), "", fmt.Errorf("malformed gid=`%s`", gid)
+func concludeObjectType(gidOrTypename string) (reflect.Type, reflect.Type, string, error) {
+	var resource string
+	submatches := gidRegex.FindStringSubmatch(gidOrTypename)
+	if len(submatches) == 2 {
+		resource = submatches[1]
+	} else {
+		resource = gidOrTypename
 	}
-	resource := submatches[1]
+
 	switch resource {
 	case "LineItem":
 		return reflect.TypeOf(model.LineItemEdge{}), reflect.TypeOf(&model.LineItem{}), fmt.Sprintf("%ss", resource), nil
@@ -461,6 +482,8 @@ func concludeObjectType(gid string) (reflect.Type, reflect.Type, string, error) 
 		return reflect.TypeOf(model.ProductEdge{}), reflect.TypeOf(&model.Product{}), fmt.Sprintf("%ss", resource), nil
 	case "ProductVariant":
 		return reflect.TypeOf(model.ProductVariantEdge{}), reflect.TypeOf(&model.ProductVariant{}), "Variants", nil
+	case "ProductBundleComponent":
+		return reflect.TypeOf(model.ProductBundleComponentEdge{}), reflect.TypeOf(&model.ProductBundleComponent{}), "BundleComponents", nil
 	case "ProductImage":
 		return reflect.TypeOf(model.ImageEdge{}), reflect.TypeOf(&model.Image{}), "Images", nil
 	case "Collection":
