@@ -194,6 +194,12 @@ var productBulkQuery = fmt.Sprintf(`
 		edges{
 			node{
 				id
+				definition{
+					id
+					name
+					namespace
+					key
+				}
 				namespace
 				key
 				value

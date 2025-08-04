@@ -2,10 +2,11 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/r0busta/go-shopify-graphql-model/v4/graph/model"
-	"github.com/r0busta/go-shopify-graphql/v9"
+	"github.com/yavuz1205/go-shopify"
 	"gopkg.in/guregu/null.v4"
 )
 
@@ -18,7 +19,8 @@ func listProducts(client *shopify.Client) {
 
 	// Print out the result
 	for _, p := range products {
-		fmt.Println(p.Title)
+		json, _ := json.MarshalIndent(p, "", "  ")
+		fmt.Println(string(json))
 	}
 }
 

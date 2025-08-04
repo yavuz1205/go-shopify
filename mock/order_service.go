@@ -10,8 +10,8 @@ import (
 
 	gomock "github.com/golang/mock/gomock"
 	model "github.com/r0busta/go-shopify-graphql-model/v4/graph/model"
-	shopify "github.com/r0busta/go-shopify-graphql/v9"
 	graphql "github.com/r0busta/graphql"
+	"github.com/yavuz1205/go-shopify"
 )
 
 // MockOrderService is a mock of OrderService interface.

@@ -6,10 +6,11 @@ func main() {
 	// client := clientWithVersion()
 
 	// Collections
-	collections(client)
+	// collections(client)
 
 	// Products
 	listProducts(client)
+	// listMetafields(client)
 	// createProduct(client)
 
 	// Bulk operations

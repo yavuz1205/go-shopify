@@ -3,8 +3,8 @@ package main
 import (
 	"os"
 
-	shopify "github.com/r0busta/go-shopify-graphql/v9"
-	graphqlclient "github.com/r0busta/go-shopify-graphql/v9/graphql"
+	shopify "github.com/yavuz1205/go-shopify"
+	graphqlclient "github.com/yavuz1205/go-shopify/graphql"
 )
 
 func clientWithVersion() *shopify.Client {

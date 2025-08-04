@@ -13,6 +13,7 @@ import (
 type MetafieldService interface {
 	ListAllShopMetafields(ctx context.Context) ([]model.Metafield, error)
 	ListShopMetafieldsByNamespace(ctx context.Context, namespace string) ([]model.Metafield, error)
+	ListMetafieldDefinitions(ctx context.Context, ownerType model.MetafieldOwnerType) ([]model.MetafieldDefinition, error)
 
 	GetShopMetafieldByKey(ctx context.Context, namespace, key string) (*model.Metafield, error)
 
@@ -91,6 +92,37 @@ func (s *MetafieldServiceOp) ListShopMetafieldsByNamespace(ctx context.Context, 
 	q = strings.ReplaceAll(q, "$namespace", namespace)
 
 	res := []model.Metafield{}
+	err := s.client.BulkOperation.BulkQuery(ctx, q, &res)
+	if err != nil {
+		return nil, fmt.Errorf("bulk query: %w", err)
+	}
+
+	return res, nil
+}
+
+func (s *MetafieldServiceOp) ListMetafieldDefinitions(ctx context.Context, ownerType model.MetafieldOwnerType) ([]model.MetafieldDefinition, error) {
+	q := `
+		{
+			metafieldDefinitions(ownerType: $ownerType) {
+				edges {
+					cursor
+					node {
+						id
+						name
+						key
+						namespace
+						ownerType
+					}
+				}
+				pageInfo {
+					hasNextPage
+				}
+			}
+		}
+`
+	q = strings.ReplaceAll(q, "$ownerType", string(ownerType))
+
+	res := []model.MetafieldDefinition{}
 	err := s.client.BulkOperation.BulkQuery(ctx, q, &res)
 	if err != nil {
 		return nil, fmt.Errorf("bulk query: %w", err)
