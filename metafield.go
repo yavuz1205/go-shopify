@@ -43,7 +43,7 @@ func (s *MetafieldServiceOp) ListAllShopMetafields(ctx context.Context) ([]model
 							description
 							id
 							key
-							legacyResourceId
+							name
 							namespace
 							ownerType
 							updatedAt
@@ -76,7 +76,7 @@ func (s *MetafieldServiceOp) ListShopMetafieldsByNamespace(ctx context.Context, 
 							description
 							id
 							key
-							legacyResourceId
+							name
 							namespace
 							ownerType
 							updatedAt
