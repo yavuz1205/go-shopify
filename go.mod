@@ -1,4 +1,4 @@
-module github.com/r0busta/go-shopify-graphql/v9
+module github.com/yavuz1205/go-shopify
 
 go 1.23
 
