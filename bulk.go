@@ -437,6 +437,13 @@ func attachNestedConnections(connectionSink map[string]interface{}, outSlice ref
 					node = node.Elem()
 				}
 
+				if node.Kind() == reflect.Interface {
+					node = node.Elem()
+					if node.Kind() == reflect.Ptr {
+						node = node.Elem()
+					}
+				}
+
 				if node.FieldByName("ID").IsValid() {
 					err := attachNestedConnections(connectionSink, edgesSlice)
 					if err != nil {
@@ -467,7 +474,7 @@ func concludeObjectType(gidOrTypename string) (reflect.Type, reflect.Type, strin
 	case "FulfillmentOrder":
 		return reflect.TypeOf(model.FulfillmentOrderEdge{}), reflect.TypeOf(&model.FulfillmentOrder{}), fmt.Sprintf("%ss", resource), nil
 	case "MediaImage":
-		return reflect.TypeOf(model.MediaEdge{}), reflect.TypeOf(&model.MediaImage{}), "Media", nil
+		return reflect.TypeOf(model.MetafieldReferenceEdge{}), reflect.TypeOf(&model.MediaImage{}), "References", nil
 	case "Video":
 		return reflect.TypeOf(model.MediaEdge{}), reflect.TypeOf(&model.Video{}), "Media", nil
 	case "Model3d":

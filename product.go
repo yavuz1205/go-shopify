@@ -204,6 +204,18 @@ var productBulkQuery = fmt.Sprintf(`
 				key
 				value
 				type
+				references{
+					edges{
+						node{
+							... on MediaImage {
+								id
+								image {
+									url
+								}
+							}
+						}
+					}
+				}
 			}
 		}
 	}
