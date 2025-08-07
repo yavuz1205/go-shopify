@@ -12,6 +12,7 @@ import (
 type ProductService interface {
 	List(ctx context.Context, query string) ([]model.Product, error)
 	ListAll(ctx context.Context) ([]model.Product, error)
+	ListAllWithVariantMetafields(ctx context.Context) ([]model.Product, error)
 
 	Get(ctx context.Context, id string) (*model.Product, error)
 
@@ -26,6 +27,8 @@ type ProductService interface {
 	VariantsBulkReorder(ctx context.Context, id string, input []model.ProductVariantPositionInput) error
 
 	MediaCreate(ctx context.Context, id string, input []model.CreateMediaInput) error
+
+	FetchVariantMetafields(ctx context.Context, variantIDs []string) (map[string][]model.Metafield, error)
 }
 
 type ProductServiceOp struct {
@@ -114,13 +117,6 @@ const productBaseQuery = `
 	}
 	templateSuffix
 	customProductType
-	featuredImage{
-		id
-		altText
-		height
-		width
-		url
-	}
 `
 
 var productQuery = fmt.Sprintf(`
@@ -212,6 +208,18 @@ var productBulkQuery = fmt.Sprintf(`
 								image {
 									url
 								}
+							}
+							... on Video {
+								id
+								sources {
+									url
+									height
+									format
+								}
+							}
+							... on GenericFile {
+								id
+								url
 							}
 						}
 					}
@@ -511,4 +519,261 @@ func (s *ProductServiceOp) MediaCreate(ctx context.Context, id string, input []m
 	}
 
 	return nil
+}
+
+func (s *ProductServiceOp) FetchVariantMetafields(ctx context.Context, variantIDs []string) (map[string][]model.Metafield, error) {
+	if len(variantIDs) == 0 {
+		return make(map[string][]model.Metafield), nil
+	}
+
+	result := make(map[string][]model.Metafield)
+	const batchSize = 200
+
+	for i := 0; i < len(variantIDs); i += batchSize {
+		end := i + batchSize
+		if end > len(variantIDs) {
+			end = len(variantIDs)
+		}
+
+		batch := variantIDs[i:end]
+		batchResult, err := s.fetchVariantMetafieldsBatch(ctx, batch)
+		if err != nil {
+			return nil, fmt.Errorf("fetch batch %d-%d: %w", i, end, err)
+		}
+
+		for k, v := range batchResult {
+			result[k] = v
+		}
+	}
+
+	return result, nil
+}
+
+func (s *ProductServiceOp) fetchVariantMetafieldsBatch(ctx context.Context, variantIDs []string) (map[string][]model.Metafield, error) {
+	gqlIDs := make([]string, len(variantIDs))
+	for i, id := range variantIDs {
+		if !strings.HasPrefix(id, "gid://shopify/ProductVariant/") {
+			gqlIDs[i] = fmt.Sprintf("gid://shopify/ProductVariant/%s", id)
+		} else {
+			gqlIDs[i] = id
+		}
+	}
+
+	query := `{
+		nodes(ids: [` + `"` + strings.Join(gqlIDs, `","`) + `"` + `]) {
+			... on ProductVariant {
+				id
+				metafields(first: 100) {
+					edges {
+						node {
+							id
+							definition {
+								id
+								name
+								namespace
+								key
+							}
+							namespace
+							key
+							value
+							type
+							references(first: 10) {
+								edges {
+									cursor
+									node {
+										__typename
+										... on MediaImage {
+											id
+											image {
+												id
+												url
+											}
+										}
+										... on Video {
+											id
+											sources {
+												url
+												width
+												height
+												format
+												mimeType
+											}
+										}
+										... on GenericFile {
+											id
+											url
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}`
+
+	out := struct {
+		Nodes []struct {
+			ID         string `json:"id"`
+			Metafields struct {
+				Edges []struct {
+					Node struct {
+						ID         string `json:"id"`
+						Definition *struct {
+							ID        string `json:"id"`
+							Name      string `json:"name"`
+							Namespace string `json:"namespace"`
+							Key       string `json:"key"`
+						} `json:"definition"`
+						Namespace  string `json:"namespace"`
+						Key        string `json:"key"`
+						Value      string `json:"value"`
+						Type       string `json:"type"`
+						References *struct {
+							Edges []struct {
+								Cursor string `json:"cursor"`
+								Node   struct {
+									Typename string `json:"__typename"`
+									ID       string `json:"id"`
+									URL      string `json:"url"`
+									Image    *struct {
+										ID  string `json:"id"`
+										URL string `json:"url"`
+									} `json:"image"`
+									Sources []struct {
+										URL    string `json:"url"`
+										Height int    `json:"height"`
+										Format string `json:"format"`
+									} `json:"sources"`
+								} `json:"node"`
+							} `json:"edges"`
+						} `json:"references"`
+					} `json:"node"`
+				} `json:"edges"`
+			} `json:"metafields"`
+		} `json:"nodes"`
+	}{}
+
+	err := s.client.gql.QueryString(ctx, query, nil, &out)
+	if err != nil {
+		return nil, fmt.Errorf("query variant metafields: %w", err)
+	}
+
+	result := make(map[string][]model.Metafield)
+	for _, node := range out.Nodes {
+		metafields := make([]model.Metafield, 0)
+		for _, edge := range node.Metafields.Edges {
+			metafield := model.Metafield{
+				ID:        edge.Node.ID,
+				Namespace: edge.Node.Namespace,
+				Key:       edge.Node.Key,
+				Value:     edge.Node.Value,
+				Type:      edge.Node.Type,
+			}
+
+			if edge.Node.Definition != nil {
+				metafield.Definition = &model.MetafieldDefinition{
+					ID:        edge.Node.Definition.ID,
+					Name:      edge.Node.Definition.Name,
+					Namespace: edge.Node.Definition.Namespace,
+					Key:       edge.Node.Definition.Key,
+				}
+			}
+
+			if edge.Node.References != nil {
+				refEdges := make([]model.MetafieldReferenceEdge, 0)
+				for _, refEdge := range edge.Node.References.Edges {
+					if refEdge.Node.Typename != "" {
+						var node model.MetafieldReference
+						if refEdge.Node.Typename == "MediaImage" && refEdge.Node.Image != nil {
+							node = &model.MediaImage{
+								ID: refEdge.Node.ID,
+								Image: &model.Image{
+									ID:  model.NewString(refEdge.Node.Image.ID),
+									URL: refEdge.Node.Image.URL,
+								},
+							}
+						} else if refEdge.Node.Typename == "GenericFile" {
+							node = &model.GenericFile{
+								ID:  refEdge.Node.ID,
+								URL: &refEdge.Node.URL,
+							}
+						} else if refEdge.Node.Typename == "Video" {
+							sources := make([]model.VideoSource, len(refEdge.Node.Sources))
+							for i, s := range refEdge.Node.Sources {
+								sources[i] = model.VideoSource{
+									URL:    s.URL,
+									Height: s.Height,
+									Format: s.Format,
+								}
+							}
+							node = &model.Video{
+								ID:      refEdge.Node.ID,
+								Sources: sources,
+							}
+						}
+
+						if node != nil {
+							refEdges = append(refEdges, model.MetafieldReferenceEdge{
+								Cursor: refEdge.Cursor,
+								Node:   node,
+							})
+						}
+					}
+				}
+				metafield.References = &model.MetafieldReferenceConnection{
+					Edges: refEdges,
+				}
+			}
+
+			metafields = append(metafields, metafield)
+		}
+		result[node.ID] = metafields
+	}
+
+	return result, nil
+}
+
+func (s *ProductServiceOp) ListAllWithVariantMetafields(ctx context.Context) ([]model.Product, error) {
+	products, err := s.ListAll(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("list products: %w", err)
+	}
+
+	var allVariantIDs []string
+	productVariantMap := make(map[string]*model.Product)
+	variantIndexMap := make(map[string]int)
+
+	for i := range products {
+		for j, edge := range products[i].Variants.Edges {
+			if edge.Node != nil {
+				allVariantIDs = append(allVariantIDs, edge.Node.ID)
+				productVariantMap[edge.Node.ID] = &products[i]
+				variantIndexMap[edge.Node.ID] = j
+			}
+		}
+	}
+
+	variantMetafields, err := s.FetchVariantMetafields(ctx, allVariantIDs)
+	if err != nil {
+		return nil, fmt.Errorf("fetch variant metafields: %w", err)
+	}
+
+	for variantID, metafields := range variantMetafields {
+		if product, exists := productVariantMap[variantID]; exists {
+			variantIndex := variantIndexMap[variantID]
+			if variantIndex < len(product.Variants.Edges) && product.Variants.Edges[variantIndex].Node != nil {
+				edges := make([]model.MetafieldEdge, len(metafields))
+				for i, mf := range metafields {
+					edges[i] = model.MetafieldEdge{Node: &mf}
+				}
+				product.Variants.Edges[variantIndex].Node.Metafields = &model.MetafieldConnection{
+					Edges: edges,
+				}
+			}
+		}
+	}
+
+	return products, nil
 }

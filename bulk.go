@@ -476,11 +476,13 @@ func concludeObjectType(gidOrTypename string) (reflect.Type, reflect.Type, strin
 	case "MediaImage":
 		return reflect.TypeOf(model.MetafieldReferenceEdge{}), reflect.TypeOf(&model.MediaImage{}), "References", nil
 	case "Video":
-		return reflect.TypeOf(model.MediaEdge{}), reflect.TypeOf(&model.Video{}), "Media", nil
+		return reflect.TypeOf(model.MetafieldReferenceEdge{}), reflect.TypeOf(&model.Video{}), "References", nil
 	case "Model3d":
-		return reflect.TypeOf(model.MediaEdge{}), reflect.TypeOf(&model.Model3d{}), "Media", nil
+		return reflect.TypeOf(model.MetafieldReferenceEdge{}), reflect.TypeOf(&model.Model3d{}), "References", nil
 	case "ExternalVideo":
-		return reflect.TypeOf(model.MediaEdge{}), reflect.TypeOf(&model.ExternalVideo{}), "Media", nil
+		return reflect.TypeOf(model.MetafieldReferenceEdge{}), reflect.TypeOf(&model.ExternalVideo{}), "References", nil
+	case "GenericFile":
+		return reflect.TypeOf(model.MetafieldReferenceEdge{}), reflect.TypeOf(&model.GenericFile{}), "References", nil
 	case "Metafield":
 		return reflect.TypeOf(model.MetafieldEdge{}), reflect.TypeOf(&model.Metafield{}), fmt.Sprintf("%ss", resource), nil
 	case "Order":

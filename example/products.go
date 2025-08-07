@@ -12,8 +12,8 @@ import (
 )
 
 func listProducts(client *shopify.Client) {
-	// Get products
-	products, err := client.Product.ListAll(context.Background())
+	// Get products with variant metafields
+	products, err := client.Product.ListAllWithVariantMetafields(context.Background())
 	if err != nil {
 		panic(err)
 	}
