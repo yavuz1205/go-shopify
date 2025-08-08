@@ -168,6 +168,10 @@ var productQuery = fmt.Sprintf(`
 				inventoryItem{
 					id
 					sku
+					unitCost{
+						amount
+						currencyCode
+					}
 				}
 				availableForSale
 				unitPriceMeasurement{
