@@ -3,6 +3,7 @@ package shopify
 import (
 	"context"
 	"fmt"
+	"maps"
 	"strings"
 
 	"github.com/r0busta/go-shopify-graphql-model/v4/graph/model"
@@ -12,7 +13,7 @@ import (
 type ProductService interface {
 	List(ctx context.Context, query string) ([]model.Product, error)
 	ListAll(ctx context.Context) ([]model.Product, error)
-	ListAllWithVariantMetafields(ctx context.Context) ([]model.Product, error)
+	ListAllExtended(ctx context.Context) ([]model.Product, error)
 
 	Get(ctx context.Context, id string) (*model.Product, error)
 
@@ -109,7 +110,7 @@ const productBaseQuery = `
 	productType
 	vendor
 	totalInventory
-	onlineStoreUrl	
+	onlineStoreUrl
 	descriptionHtml
 	seo{
 		description
@@ -121,14 +122,14 @@ const productBaseQuery = `
 
 var productQuery = fmt.Sprintf(`
 	%s
-	bundleComponents(first: 100){
+	bundleComponents {
 		edges{
 			node{
 				quantity
 				componentProduct{
 					id
 				}
-              componentVariants(first: 100) {
+              componentVariants {
                 edges {
                   node {
                     id
@@ -166,7 +167,7 @@ var productQuery = fmt.Sprintf(`
 				inventoryQuantity
 				inventoryItem{
 					id
-					sku						
+					sku
 				}
 				availableForSale
 				unitPriceMeasurement{
@@ -227,17 +228,6 @@ var productBulkQuery = fmt.Sprintf(`
 			}
 		}
 	}
-	bundleComponents{
-		edges{
-			node{
-				__typename
-				quantity
-				componentProduct{
-					id
-				}
-			}
-		}
-	}
 	variants{
 		edges{
 			node{
@@ -266,7 +256,7 @@ var productBulkQuery = fmt.Sprintf(`
 				inventoryQuantity
 				inventoryItem{
 					id
-					sku							
+					sku
 				}
 				availableForSale
 				unitPriceMeasurement{
@@ -735,23 +725,39 @@ func (s *ProductServiceOp) fetchVariantMetafieldsBatch(ctx context.Context, vari
 	return result, nil
 }
 
-func (s *ProductServiceOp) ListAllWithVariantMetafields(ctx context.Context) ([]model.Product, error) {
+func (s *ProductServiceOp) ListAllExtended(ctx context.Context) ([]model.Product, error) {
 	products, err := s.ListAll(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("list products: %w", err)
 	}
 
+	var allProductIDs []string
 	var allVariantIDs []string
+	productMap := make(map[string]*model.Product)
 	productVariantMap := make(map[string]*model.Product)
 	variantIndexMap := make(map[string]int)
 
 	for i := range products {
+		allProductIDs = append(allProductIDs, products[i].ID)
+		productMap[products[i].ID] = &products[i]
 		for j, edge := range products[i].Variants.Edges {
 			if edge.Node != nil {
 				allVariantIDs = append(allVariantIDs, edge.Node.ID)
 				productVariantMap[edge.Node.ID] = &products[i]
 				variantIndexMap[edge.Node.ID] = j
 			}
+		}
+	}
+
+	bundleComponents, err := s.fetchBundleComponents(ctx, allProductIDs)
+	if err != nil {
+		return nil, fmt.Errorf("fetch bundle components: %w", err)
+	}
+
+	for productID, components := range bundleComponents {
+		if product, exists := productMap[productID]; exists {
+			c := components
+			product.BundleComponents = &c
 		}
 	}
 
@@ -776,4 +782,90 @@ func (s *ProductServiceOp) ListAllWithVariantMetafields(ctx context.Context) ([]
 	}
 
 	return products, nil
+}
+
+func (s *ProductServiceOp) fetchBundleComponents(ctx context.Context, productIDs []string) (map[string]model.ProductBundleComponentConnection, error) {
+	if len(productIDs) == 0 {
+		return make(map[string]model.ProductBundleComponentConnection), nil
+	}
+
+	result := make(map[string]model.ProductBundleComponentConnection)
+	const batchSize = 10
+
+	for i := 0; i < len(productIDs); i += batchSize {
+		end := min(i+batchSize, len(productIDs))
+
+		batch := productIDs[i:end]
+		batchResult, err := s.fetchBundleComponentsBatch(ctx, batch)
+		if err != nil {
+			return nil, fmt.Errorf("fetch bundle components batch %d-%d: %w", i, end, err)
+		}
+
+		maps.Copy(result, batchResult)
+	}
+
+	return result, nil
+}
+
+func (s *ProductServiceOp) fetchBundleComponentsBatch(ctx context.Context, productIDs []string) (map[string]model.ProductBundleComponentConnection, error) {
+	gqlIDs := make([]string, len(productIDs))
+	copy(gqlIDs, productIDs)
+
+	const bundleComponentsQuery = `
+		bundleComponents(first: 100) {
+		  edges {
+			node {
+			  quantity
+			  componentVariants(first: 50) {
+				edges {
+				  node {
+					id
+					inventoryItem {
+					  inventoryLevels(first: 10) {
+						edges {
+						  node {
+							location {
+							  id
+							}
+						  }
+						}
+					  }
+					}
+				  }
+				}
+			  }
+			}
+		  }
+		}
+	`
+
+	query := `{
+		nodes(ids: [` + `"` + strings.Join(gqlIDs, `","`) + `"` + `]) {
+			... on Product {
+				id
+				` + bundleComponentsQuery + `
+			}
+		}
+	}`
+
+	out := struct {
+		Nodes []struct {
+			ID               string                                 `json:"id"`
+			BundleComponents model.ProductBundleComponentConnection `json:"bundleComponents"`
+		} `json:"nodes"`
+	}{}
+
+	err := s.client.gql.QueryString(ctx, query, nil, &out)
+	if err != nil {
+		return nil, fmt.Errorf("query bundle components: %w", err)
+	}
+
+	result := make(map[string]model.ProductBundleComponentConnection)
+	for _, node := range out.Nodes {
+		if node.ID != "" {
+			result[node.ID] = node.BundleComponents
+		}
+	}
+
+	return result, nil
 }

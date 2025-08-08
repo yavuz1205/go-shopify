@@ -13,7 +13,7 @@ import (
 
 func listProducts(client *shopify.Client) {
 	// Get products with variant metafields
-	products, err := client.Product.ListAllWithVariantMetafields(context.Background())
+	products, err := client.Product.ListAllExtended(context.Background())
 	if err != nil {
 		panic(err)
 	}
