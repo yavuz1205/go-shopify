@@ -239,14 +239,6 @@ var productBulkQuery = fmt.Sprintf(`
 				title
 				displayName
 				sku
-				selectedOptions{
-					name
-					value
-					optionValue{
-						id
-						name
-					}
-				}
 				position
 				image {
 					id
@@ -264,6 +256,14 @@ var productBulkQuery = fmt.Sprintf(`
 					unitCost{
 						amount
 						currencyCode
+					}
+				}
+				selectedOptions{
+					name
+					value
+					optionValue{
+						id
+						name
 					}
 				}
 				availableForSale
@@ -757,6 +757,21 @@ func (s *ProductServiceOp) ListAllExtended(ctx context.Context) ([]model.Product
 		}
 	}
 
+	inventoryLevels, err := s.fetchInventoryLevels(ctx, allVariantIDs)
+	if err != nil {
+		return nil, fmt.Errorf("fetch inventory levels: %w", err)
+	}
+
+	for variantID, levels := range inventoryLevels {
+		if product, exists := productVariantMap[variantID]; exists {
+			variantIndex := variantIndexMap[variantID]
+			if variantIndex < len(product.Variants.Edges) && product.Variants.Edges[variantIndex].Node != nil {
+				l := levels
+				product.Variants.Edges[variantIndex].Node.InventoryItem.InventoryLevels = &l
+			}
+		}
+	}
+
 	bundleComponents, err := s.fetchBundleComponents(ctx, allProductIDs)
 	if err != nil {
 		return nil, fmt.Errorf("fetch bundle components: %w", err)
@@ -828,17 +843,6 @@ func (s *ProductServiceOp) fetchBundleComponentsBatch(ctx context.Context, produ
 				edges {
 				  node {
 					id
-					inventoryItem {
-					  inventoryLevels(first: 10) {
-						edges {
-						  node {
-							location {
-							  id
-							}
-						  }
-						}
-					  }
-					}
 				  }
 				}
 			  }
@@ -872,6 +876,86 @@ func (s *ProductServiceOp) fetchBundleComponentsBatch(ctx context.Context, produ
 	for _, node := range out.Nodes {
 		if node.ID != "" {
 			result[node.ID] = node.BundleComponents
+		}
+	}
+
+	return result, nil
+}
+
+func (s *ProductServiceOp) fetchInventoryLevels(ctx context.Context, variantIDs []string) (map[string]model.InventoryLevelConnection, error) {
+	if len(variantIDs) == 0 {
+		return make(map[string]model.InventoryLevelConnection), nil
+	}
+
+	result := make(map[string]model.InventoryLevelConnection)
+	const batchSize = 10
+
+	for i := 0; i < len(variantIDs); i += batchSize {
+		end := min(i+batchSize, len(variantIDs))
+		batch := variantIDs[i:end]
+		batchResult, err := s.fetchInventoryLevelsBatch(ctx, batch)
+		if err != nil {
+			return nil, fmt.Errorf("fetch inventory levels batch %d-%d: %w", i, end, err)
+		}
+		maps.Copy(result, batchResult)
+	}
+
+	return result, nil
+}
+
+func (s *ProductServiceOp) fetchInventoryLevelsBatch(ctx context.Context, variantIDs []string) (map[string]model.InventoryLevelConnection, error) {
+	gqlIDs := make([]string, len(variantIDs))
+	copy(gqlIDs, variantIDs)
+
+	const inventoryLevelsQuery = `
+		inventoryLevels(first: 10) {
+			edges {
+				node {
+					id
+					location {
+						id
+						name
+					}
+					quantities(names: ["available"]) {
+						id
+						name
+						quantity
+					}
+				}
+			}
+		}
+	`
+
+	query := `{
+		nodes(ids: [` + `"` + strings.Join(gqlIDs, `","`) + `"` + `]) {
+			... on ProductVariant {
+				id
+				inventoryItem {
+					id
+					` + inventoryLevelsQuery + `
+				}
+			}
+		}
+	}`
+
+	out := struct {
+		Nodes []struct {
+			ID            string `json:"id"`
+			InventoryItem *struct {
+				InventoryLevels model.InventoryLevelConnection `json:"inventoryLevels"`
+			} `json:"inventoryItem"`
+		} `json:"nodes"`
+	}{}
+
+	err := s.client.gql.QueryString(ctx, query, nil, &out)
+	if err != nil {
+		return nil, fmt.Errorf("query inventory levels: %w", err)
+	}
+
+	result := make(map[string]model.InventoryLevelConnection)
+	for _, node := range out.Nodes {
+		if node.ID != "" && node.InventoryItem != nil {
+			result[node.ID] = node.InventoryItem.InventoryLevels
 		}
 	}
 
