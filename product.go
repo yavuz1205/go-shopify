@@ -146,6 +146,7 @@ var productQuery = fmt.Sprintf(`
 				title
 				displayName
 				sku
+				barcode
 				selectedOptions{
 					name
 					value
@@ -239,6 +240,7 @@ var productBulkQuery = fmt.Sprintf(`
 				title
 				displayName
 				sku
+				barcode
 				position
 				image {
 					id
