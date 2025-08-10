@@ -169,6 +169,12 @@ var productQuery = fmt.Sprintf(`
 				inventoryItem{
 					id
 					sku
+					measurement {
+              			weight {
+                			unit
+               				value
+              			}
+					}
 					unitCost{
 						amount
 						currencyCode
@@ -255,6 +261,12 @@ var productBulkQuery = fmt.Sprintf(`
 				inventoryItem{
 					id
 					sku
+					measurement {
+              			weight {
+                			unit
+               				value
+              			}
+					}
 					unitCost{
 						amount
 						currencyCode
