@@ -818,7 +818,93 @@ func (s *ProductServiceOp) ListAllExtended(ctx context.Context) ([]model.Product
 		}
 	}
 
+	resourcePublications, err := s.fetchResourcePublications(ctx, allProductIDs)
+	if err != nil {
+		return nil, fmt.Errorf("fetch resource publications: %w", err)
+	}
+
+	for productID, publications := range resourcePublications {
+		if product, exists := productMap[productID]; exists {
+			p := publications
+			product.ResourcePublications = &p
+		}
+	}
+
 	return products, nil
+}
+
+func (s *ProductServiceOp) fetchResourcePublications(ctx context.Context, productIDs []string) (map[string]model.ResourcePublicationConnection, error) {
+	if len(productIDs) == 0 {
+		return make(map[string]model.ResourcePublicationConnection), nil
+	}
+
+	result := make(map[string]model.ResourcePublicationConnection)
+	const batchSize = 10
+
+	for i := 0; i < len(productIDs); i += batchSize {
+		end := min(i+batchSize, len(productIDs))
+
+		batch := productIDs[i:end]
+		batchResult, err := s.fetchResourcePublicationsBatch(ctx, batch)
+		if err != nil {
+			return nil, fmt.Errorf("fetch resource publications batch %d-%d: %w", i, end, err)
+		}
+
+		maps.Copy(result, batchResult)
+	}
+
+	return result, nil
+}
+
+func (s *ProductServiceOp) fetchResourcePublicationsBatch(ctx context.Context, productIDs []string) (map[string]model.ResourcePublicationConnection, error) {
+	gqlIDs := make([]string, len(productIDs))
+	copy(gqlIDs, productIDs)
+
+	const resourcePublicationsQuery = `
+		resourcePublications(first: 10) {
+			edges {
+				node {
+					isPublished
+					publication {
+						id
+						app {
+							id
+						}
+					}
+				}
+			}
+		}
+	`
+
+	query := `{
+		nodes(ids: [` + `"` + strings.Join(gqlIDs, `","`) + `"` + `]) {
+			... on Product {
+				id
+				` + resourcePublicationsQuery + `
+			}
+		}
+	}`
+
+	out := struct {
+		Nodes []struct {
+			ID                   string                              `json:"id"`
+			ResourcePublications model.ResourcePublicationConnection `json:"resourcePublications"`
+		} `json:"nodes"`
+	}{}
+
+	err := s.client.gql.QueryString(ctx, query, nil, &out)
+	if err != nil {
+		return nil, fmt.Errorf("query resource publications: %w", err)
+	}
+
+	result := make(map[string]model.ResourcePublicationConnection)
+	for _, node := range out.Nodes {
+		if node.ID != "" {
+			result[node.ID] = node.ResourcePublications
+		}
+	}
+
+	return result, nil
 }
 
 func (s *ProductServiceOp) fetchBundleComponents(ctx context.Context, productIDs []string) (map[string]model.ProductBundleComponentConnection, error) {
