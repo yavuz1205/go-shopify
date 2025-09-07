@@ -198,47 +198,6 @@ var productQuery = fmt.Sprintf(`
 
 var productBulkQuery = fmt.Sprintf(`
 	%s
-	metafields{
-		edges{
-			node{
-				id
-				definition{
-					id
-					name
-					namespace
-					key
-				}
-				namespace
-				key
-				value
-				type
-				references{
-					edges{
-						node{
-							... on MediaImage {
-								id
-								image {
-									url
-								}
-							}
-							... on Video {
-								id
-								sources {
-									url
-									height
-									format
-								}
-							}
-							... on GenericFile {
-								id
-								url
-							}
-						}
-					}
-				}
-			}
-		}
-	}
 	variants{
 		edges{
 			node{
@@ -830,6 +789,18 @@ func (s *ProductServiceOp) ListAllExtended(ctx context.Context) ([]model.Product
 		}
 	}
 
+	productMetafields, err := s.fetchProductMetafields(ctx, allProductIDs)
+	if err != nil {
+		return nil, fmt.Errorf("fetch product metafields: %w", err)
+	}
+
+	for productID, metafields := range productMetafields {
+		if product, exists := productMap[productID]; exists {
+			m := metafields
+			product.Metafields = &m
+		}
+	}
+
 	return products, nil
 }
 
@@ -904,6 +875,217 @@ func (s *ProductServiceOp) fetchResourcePublicationsBatch(ctx context.Context, p
 		}
 	}
 
+	return result, nil
+}
+
+func (s *ProductServiceOp) fetchProductMetafields(ctx context.Context, productIDs []string) (map[string]model.MetafieldConnection, error) {
+	if len(productIDs) == 0 {
+		return make(map[string]model.MetafieldConnection), nil
+	}
+
+	result := make(map[string]model.MetafieldConnection)
+	const batchSize = 10
+
+	for i := 0; i < len(productIDs); i += batchSize {
+		end := min(i+batchSize, len(productIDs))
+
+		batch := productIDs[i:end]
+		batchResult, err := s.fetchProductMetafieldsBatch(ctx, batch)
+		if err != nil {
+			return nil, fmt.Errorf("fetch product metafields batch %d-%d: %w", i, end, err)
+		}
+
+		maps.Copy(result, batchResult)
+	}
+
+	return result, nil
+}
+
+func (s *ProductServiceOp) fetchProductMetafieldsBatch(ctx context.Context, productIDs []string) (map[string]model.MetafieldConnection, error) {
+	gqlIDs := make([]string, len(productIDs))
+	copy(gqlIDs, productIDs)
+
+	const metafieldsQuery = `
+		metafields(first: 100) {
+			edges {
+				node {
+					id
+					definition {
+						id
+						name
+						namespace
+						key
+					}
+					namespace
+					key
+					value
+					type
+					references(first: 10) {
+						edges {
+							cursor
+							node {
+								__typename
+								... on MediaImage {
+									id
+									image {
+										id
+										url
+									}
+								}
+								... on Video {
+									id
+									sources {
+										url
+										width
+										height
+										format
+										mimeType
+									}
+								}
+								... on GenericFile {
+									id
+									url
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	`
+
+	query := `{
+		nodes(ids: [` + `"` + strings.Join(gqlIDs, `","`) + `"` + `]) {
+			... on Product {
+				id
+				` + metafieldsQuery + `
+			}
+		}
+	}`
+
+	out := struct {
+		Nodes []struct {
+			ID         string `json:"id"`
+			Metafields struct {
+				Edges []struct {
+					Node struct {
+						ID         string `json:"id"`
+						Definition *struct {
+							ID        string `json:"id"`
+							Name      string `json:"name"`
+							Namespace string `json:"namespace"`
+							Key       string `json:"key"`
+						} `json:"definition"`
+						Namespace  string `json:"namespace"`
+						Key        string `json:"key"`
+						Value      string `json:"value"`
+						Type       string `json:"type"`
+						References *struct {
+							Edges []struct {
+								Cursor string `json:"cursor"`
+								Node   struct {
+									Typename string `json:"__typename"`
+									ID       string `json:"id"`
+									URL      string `json:"url"`
+									Image    *struct {
+										ID  string `json:"id"`
+										URL string `json:"url"`
+									} `json:"image"`
+									Sources []struct {
+										URL      string `json:"url"`
+										Height   int    `json:"height"`
+										Format   string `json:"format"`
+										MimeType string `json:"mimeType"`
+									} `json:"sources"`
+								} `json:"node"`
+							} `json:"edges"`
+						} `json:"references"`
+					} `json:"node"`
+				} `json:"edges"`
+			} `json:"metafields"`
+		} `json:"nodes"`
+	}{}
+
+	err := s.client.gql.QueryString(ctx, query, nil, &out)
+	if err != nil {
+		return nil, fmt.Errorf("query product metafields: %w", err)
+	}
+
+	result := make(map[string]model.MetafieldConnection)
+	for _, node := range out.Nodes {
+		if node.ID != "" {
+			metafieldEdges := make([]model.MetafieldEdge, 0)
+			for _, edge := range node.Metafields.Edges {
+				metafield := model.Metafield{
+					ID:        edge.Node.ID,
+					Namespace: edge.Node.Namespace,
+					Key:       edge.Node.Key,
+					Value:     edge.Node.Value,
+					Type:      edge.Node.Type,
+				}
+
+				if edge.Node.Definition != nil {
+					metafield.Definition = &model.MetafieldDefinition{
+						ID:        edge.Node.Definition.ID,
+						Name:      edge.Node.Definition.Name,
+						Namespace: edge.Node.Definition.Namespace,
+						Key:       edge.Node.Definition.Key,
+					}
+				}
+
+				if edge.Node.References != nil {
+					refEdges := make([]model.MetafieldReferenceEdge, 0)
+					for _, refEdge := range edge.Node.References.Edges {
+						if refEdge.Node.Typename != "" {
+							var referenceNode model.MetafieldReference
+							if refEdge.Node.Typename == "MediaImage" && refEdge.Node.Image != nil {
+								referenceNode = &model.MediaImage{
+									ID: refEdge.Node.ID,
+									Image: &model.Image{
+										ID:  model.NewString(refEdge.Node.Image.ID),
+										URL: refEdge.Node.Image.URL,
+									},
+								}
+							} else if refEdge.Node.Typename == "GenericFile" {
+								referenceNode = &model.GenericFile{
+									ID:  refEdge.Node.ID,
+									URL: &refEdge.Node.URL,
+								}
+							} else if refEdge.Node.Typename == "Video" {
+								sources := make([]model.VideoSource, len(refEdge.Node.Sources))
+								for i, s := range refEdge.Node.Sources {
+									sources[i] = model.VideoSource{
+										URL:      s.URL,
+										Height:   s.Height,
+										Format:   s.Format,
+										MimeType: s.MimeType,
+									}
+								}
+								referenceNode = &model.Video{
+									ID:      refEdge.Node.ID,
+									Sources: sources,
+								}
+							}
+
+							if referenceNode != nil {
+								refEdges = append(refEdges, model.MetafieldReferenceEdge{
+									Cursor: refEdge.Cursor,
+									Node:   referenceNode,
+								})
+							}
+						}
+					}
+					metafield.References = &model.MetafieldReferenceConnection{
+						Edges: refEdges,
+					}
+				}
+				metafieldEdges = append(metafieldEdges, model.MetafieldEdge{Node: &metafield})
+			}
+			result[node.ID] = model.MetafieldConnection{
+				Edges: metafieldEdges,
+			}
+		}
+	}
 	return result, nil
 }
 
