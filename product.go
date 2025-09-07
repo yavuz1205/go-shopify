@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"time"
 
 	"github.com/r0busta/go-shopify-graphql-model/v4/graph/model"
 )
@@ -349,7 +350,7 @@ func (s *ProductServiceOp) getPage(ctx context.Context, id string, cursor string
 	out := struct {
 		Product *model.Product `json:"product"`
 	}{}
-	err := s.client.gql.QueryString(ctx, q, vars, &out)
+	err := s.executeGraphQLQueryWithRetry(ctx, q, vars, &out)
 	if err != nil {
 		return nil, fmt.Errorf("query: %w", err)
 	}
@@ -375,6 +376,27 @@ func (s *ProductServiceOp) Create(ctx context.Context, product model.ProductCrea
 	}
 
 	return &m.ProductCreateResult.Product.ID, nil
+}
+
+func (s *ProductServiceOp) executeGraphQLQueryWithRetry(ctx context.Context, query string, vars map[string]interface{}, out interface{}) error {
+	var err error
+	maxRetries := 5
+	baseDelay := 200 * time.Millisecond
+
+	for i := range maxRetries {
+		err = s.client.gql.QueryString(ctx, query, vars, out)
+		if err == nil {
+			return nil
+		}
+
+		if strings.Contains(err.Error(), "Throttled") {
+			delay := baseDelay * time.Duration(1<<i)
+			time.Sleep(delay)
+			continue
+		}
+		return err
+	}
+	return err
 }
 
 func (s *ProductServiceOp) Update(ctx context.Context, product model.ProductUpdateInput, media []model.CreateMediaInput) error {
@@ -501,10 +523,7 @@ func (s *ProductServiceOp) FetchVariantMetafields(ctx context.Context, variantID
 	const batchSize = 200
 
 	for i := 0; i < len(variantIDs); i += batchSize {
-		end := i + batchSize
-		if end > len(variantIDs) {
-			end = len(variantIDs)
-		}
+		end := min(i+batchSize, len(variantIDs))
 
 		batch := variantIDs[i:end]
 		batchResult, err := s.fetchVariantMetafieldsBatch(ctx, batch)
@@ -512,9 +531,7 @@ func (s *ProductServiceOp) FetchVariantMetafields(ctx context.Context, variantID
 			return nil, fmt.Errorf("fetch batch %d-%d: %w", i, end, err)
 		}
 
-		for k, v := range batchResult {
-			result[k] = v
-		}
+		maps.Copy(result, batchResult)
 	}
 
 	return result, nil
@@ -626,7 +643,7 @@ func (s *ProductServiceOp) fetchVariantMetafieldsBatch(ctx context.Context, vari
 		} `json:"nodes"`
 	}{}
 
-	err := s.client.gql.QueryString(ctx, query, nil, &out)
+	err := s.executeGraphQLQueryWithRetry(ctx, query, nil, &out)
 	if err != nil {
 		return nil, fmt.Errorf("query variant metafields: %w", err)
 	}
@@ -863,7 +880,7 @@ func (s *ProductServiceOp) fetchResourcePublicationsBatch(ctx context.Context, p
 		} `json:"nodes"`
 	}{}
 
-	err := s.client.gql.QueryString(ctx, query, nil, &out)
+	err := s.executeGraphQLQueryWithRetry(ctx, query, nil, &out)
 	if err != nil {
 		return nil, fmt.Errorf("query resource publications: %w", err)
 	}
@@ -1006,7 +1023,7 @@ func (s *ProductServiceOp) fetchProductMetafieldsBatch(ctx context.Context, prod
 		} `json:"nodes"`
 	}{}
 
-	err := s.client.gql.QueryString(ctx, query, nil, &out)
+	err := s.executeGraphQLQueryWithRetry(ctx, query, nil, &out)
 	if err != nil {
 		return nil, fmt.Errorf("query product metafields: %w", err)
 	}
@@ -1149,7 +1166,7 @@ func (s *ProductServiceOp) fetchBundleComponentsBatch(ctx context.Context, produ
 		} `json:"nodes"`
 	}{}
 
-	err := s.client.gql.QueryString(ctx, query, nil, &out)
+	err := s.executeGraphQLQueryWithRetry(ctx, query, nil, &out)
 	if err != nil {
 		return nil, fmt.Errorf("query bundle components: %w", err)
 	}
@@ -1229,7 +1246,7 @@ func (s *ProductServiceOp) fetchInventoryLevelsBatch(ctx context.Context, varian
 		} `json:"nodes"`
 	}{}
 
-	err := s.client.gql.QueryString(ctx, query, nil, &out)
+	err := s.executeGraphQLQueryWithRetry(ctx, query, nil, &out)
 	if err != nil {
 		return nil, fmt.Errorf("query inventory levels: %w", err)
 	}
