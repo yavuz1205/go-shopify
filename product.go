@@ -827,7 +827,7 @@ func (s *ProductServiceOp) fetchResourcePublications(ctx context.Context, produc
 	}
 
 	result := make(map[string]model.ResourcePublicationConnection)
-	const batchSize = 10
+	const batchSize = 30
 
 	for i := 0; i < len(productIDs); i += batchSize {
 		end := min(i+batchSize, len(productIDs))
@@ -849,7 +849,7 @@ func (s *ProductServiceOp) fetchResourcePublicationsBatch(ctx context.Context, p
 	copy(gqlIDs, productIDs)
 
 	const resourcePublicationsQuery = `
-		resourcePublications(first: 10) {
+		resourcePublications(first: 30) {
 			edges {
 				node {
 					isPublished
