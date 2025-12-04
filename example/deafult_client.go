@@ -10,9 +10,11 @@ import (
 )
 
 func defaultClient() *shopify.Client {
-	err := godotenv.Load("../.env")
-	if err != nil {
-		log.Fatalf("Error loading .env file: %v", err)
+	// Try loading from current directory first, then fallback to parent directory
+	if err := godotenv.Load(); err != nil {
+		if err := godotenv.Load("../.env"); err != nil {
+			log.Fatalf("Error loading .env file: %v", err)
+		}
 	}
 
 	if os.Getenv("STORE_API_KEY") == "" || os.Getenv("STORE_PASSWORD") == "" || os.Getenv("STORE_NAME") == "" {

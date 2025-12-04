@@ -43,13 +43,34 @@ func WithPrivateAppAuth(apiKey string, accessToken string) Option {
 	}
 }
 
+func WithRateLimiter(limiter *RateLimiter) Option {
+	return func(t *transport) {
+		t.rateLimiter = limiter
+	}
+}
+
 type transport struct {
 	accessToken string
 	apiKey      string
 	apiBasePath string
+	rateLimiter *RateLimiter
 }
 
 func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.rateLimiter != nil {
+		estimatedCost := 50
+		if v := req.Context().Value(CostContextKey); v != nil {
+			if c, ok := v.(int); ok {
+				estimatedCost = c
+			}
+		}
+
+		if err := t.rateLimiter.Wait(req.Context(), estimatedCost); err != nil {
+			return nil, err
+		}
+		defer t.rateLimiter.Done(estimatedCost)
+	}
+
 	isAccessTokenSet := t.accessToken != ""
 	areBasicAuthCredentialsSet := t.apiKey != "" && isAccessTokenSet
 
@@ -59,7 +80,16 @@ func (t *transport) RoundTrip(req *http.Request) (*http.Response, error) {
 		req.Header.Set(shopifyAccessTokenHeader, t.accessToken)
 	}
 
-	return http.DefaultTransport.RoundTrip(req)
+	resp, err := http.DefaultTransport.RoundTrip(req)
+	if err != nil {
+		return nil, err
+	}
+
+	if t.rateLimiter != nil {
+		t.rateLimiter.Update(resp.Header.Get("X-Shopify-Shop-Api-Call-Limit"))
+	}
+
+	return resp, nil
 }
 
 // NewClient creates a new client (in fact, just a simple wrapper for a graphql.Client).

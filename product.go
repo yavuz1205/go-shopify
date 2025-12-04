@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/r0busta/go-shopify-graphql-model/v4/graph/model"
+	graphqlclient "github.com/yavuz1205/go-shopify/graphql"
+	"golang.org/x/sync/errgroup"
 )
 
 //go:generate mockgen -destination=./mock/product_service.go -package=mock . ProductService
@@ -380,19 +382,23 @@ func (s *ProductServiceOp) Create(ctx context.Context, product model.ProductCrea
 
 func (s *ProductServiceOp) executeGraphQLQueryWithRetry(ctx context.Context, query string, vars map[string]interface{}, out interface{}) error {
 	var err error
-	maxRetries := 5
-	baseDelay := 200 * time.Millisecond
+	maxRetries := 10             // Increased from 5
+	baseDelay := 1 * time.Second // Increased from 200ms
 
-	for i := range maxRetries {
+	for i := 0; i < maxRetries; i++ {
 		err = s.client.gql.QueryString(ctx, query, vars, out)
 		if err == nil {
 			return nil
 		}
 
-		if strings.Contains(err.Error(), "Throttled") {
+		if strings.Contains(err.Error(), "Throttled") || strings.Contains(err.Error(), "Cost limit exceeded") {
 			delay := baseDelay * time.Duration(1<<i)
-			time.Sleep(delay)
-			continue
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(delay):
+				continue
+			}
 		}
 		return err
 	}
@@ -520,7 +526,7 @@ func (s *ProductServiceOp) FetchVariantMetafields(ctx context.Context, variantID
 	}
 
 	result := make(map[string][]model.Metafield)
-	const batchSize = 200
+	const batchSize = 5
 
 	for i := 0; i < len(variantIDs); i += batchSize {
 		end := min(i+batchSize, len(variantIDs))
@@ -643,6 +649,11 @@ func (s *ProductServiceOp) fetchVariantMetafieldsBatch(ctx context.Context, vari
 		} `json:"nodes"`
 	}{}
 
+	// Estimate cost: 1 (base) + len(ids) * (1 + 100 (metafields))
+	// This is a rough upper bound.
+	cost := 1 + len(variantIDs)*101
+	ctx = graphqlclient.WithEstimatedCost(ctx, cost)
+
 	err := s.executeGraphQLQueryWithRetry(ctx, query, nil, &out)
 	if err != nil {
 		return nil, fmt.Errorf("query variant metafields: %w", err)
@@ -747,78 +758,185 @@ func (s *ProductServiceOp) ListAllExtended(ctx context.Context) ([]model.Product
 		}
 	}
 
-	inventoryLevels, err := s.fetchInventoryLevels(ctx, allVariantIDs)
-	if err != nil {
-		return nil, fmt.Errorf("fetch inventory levels: %w", err)
-	}
+	// Create an errgroup to fetch extended data concurrently
+	g, ctx := errgroup.WithContext(ctx)
 
-	for variantID, levels := range inventoryLevels {
-		if product, exists := productVariantMap[variantID]; exists {
-			variantIndex := variantIndexMap[variantID]
-			if variantIndex < len(product.Variants.Edges) && product.Variants.Edges[variantIndex].Node != nil {
-				l := levels
-				product.Variants.Edges[variantIndex].Node.InventoryItem.InventoryLevels = &l
-			}
+	// Fetch Inventory Levels
+	g.Go(func() error {
+		inventoryLevels, err := s.fetchInventoryLevels(ctx, allVariantIDs)
+		if err != nil {
+			return fmt.Errorf("fetch inventory levels: %w", err)
 		}
-	}
-
-	bundleComponents, err := s.fetchBundleComponents(ctx, allProductIDs)
-	if err != nil {
-		return nil, fmt.Errorf("fetch bundle components: %w", err)
-	}
-
-	for productID, components := range bundleComponents {
-		if product, exists := productMap[productID]; exists {
-			c := components
-			product.BundleComponents = &c
-		}
-	}
-
-	variantMetafields, err := s.FetchVariantMetafields(ctx, allVariantIDs)
-	if err != nil {
-		return nil, fmt.Errorf("fetch variant metafields: %w", err)
-	}
-
-	for variantID, metafields := range variantMetafields {
-		if product, exists := productVariantMap[variantID]; exists {
-			variantIndex := variantIndexMap[variantID]
-			if variantIndex < len(product.Variants.Edges) && product.Variants.Edges[variantIndex].Node != nil {
-				edges := make([]model.MetafieldEdge, len(metafields))
-				for i, mf := range metafields {
-					edges[i] = model.MetafieldEdge{Node: &mf}
-				}
-				product.Variants.Edges[variantIndex].Node.Metafields = &model.MetafieldConnection{
-					Edges: edges,
+		for variantID, levels := range inventoryLevels {
+			if product, exists := productVariantMap[variantID]; exists {
+				variantIndex := variantIndexMap[variantID]
+				if variantIndex < len(product.Variants.Edges) && product.Variants.Edges[variantIndex].Node != nil {
+					l := levels
+					product.Variants.Edges[variantIndex].Node.InventoryItem.InventoryLevels = &l
 				}
 			}
 		}
-	}
+		return nil
+	})
 
-	resourcePublications, err := s.fetchResourcePublications(ctx, allProductIDs)
-	if err != nil {
-		return nil, fmt.Errorf("fetch resource publications: %w", err)
-	}
-
-	for productID, publications := range resourcePublications {
-		if product, exists := productMap[productID]; exists {
-			p := publications
-			product.ResourcePublications = &p
+	// Fetch Bundle Components
+	g.Go(func() error {
+		bundleComponents, err := s.fetchBundleComponents(ctx, allProductIDs)
+		if err != nil {
+			return fmt.Errorf("fetch bundle components: %w", err)
 		}
-	}
-
-	productMetafields, err := s.fetchProductMetafields(ctx, allProductIDs)
-	if err != nil {
-		return nil, fmt.Errorf("fetch product metafields: %w", err)
-	}
-
-	for productID, metafields := range productMetafields {
-		if product, exists := productMap[productID]; exists {
-			m := metafields
-			product.Metafields = &m
+		for productID, components := range bundleComponents {
+			if product, exists := productMap[productID]; exists {
+				c := components
+				product.BundleComponents = &c
+			}
 		}
+		return nil
+	})
+
+	// Fetch Variant Metafields
+	g.Go(func() error {
+		variantMetafields, err := s.FetchVariantMetafields(ctx, allVariantIDs)
+		if err != nil {
+			return fmt.Errorf("fetch variant metafields: %w", err)
+		}
+		for variantID, metafields := range variantMetafields {
+			if product, exists := productVariantMap[variantID]; exists {
+				variantIndex := variantIndexMap[variantID]
+				if variantIndex < len(product.Variants.Edges) && product.Variants.Edges[variantIndex].Node != nil {
+					edges := make([]model.MetafieldEdge, len(metafields))
+					for i, mf := range metafields {
+						edges[i] = model.MetafieldEdge{Node: &mf}
+					}
+					product.Variants.Edges[variantIndex].Node.Metafields = &model.MetafieldConnection{
+						Edges: edges,
+					}
+				}
+			}
+		}
+		return nil
+	})
+
+	// Fetch Resource Publications
+	g.Go(func() error {
+		resourcePublications, err := s.fetchResourcePublications(ctx, allProductIDs)
+		if err != nil {
+			return fmt.Errorf("fetch resource publications: %w", err)
+		}
+		for productID, publications := range resourcePublications {
+			if product, exists := productMap[productID]; exists {
+				p := publications
+				product.ResourcePublications = &p
+			}
+		}
+		return nil
+	})
+
+	// Fetch Product Metafields
+	g.Go(func() error {
+		productMetafields, err := s.fetchProductMetafields(ctx, allProductIDs)
+		if err != nil {
+			return fmt.Errorf("fetch product metafields: %w", err)
+		}
+		for productID, metafields := range productMetafields {
+			if product, exists := productMap[productID]; exists {
+				m := metafields
+				product.Metafields = &m
+			}
+		}
+		return nil
+	})
+
+	// Fetch Product Collections
+	g.Go(func() error {
+		productCollections, err := s.fetchProductCollections(ctx, allProductIDs)
+		if err != nil {
+			return fmt.Errorf("fetch product collections: %w", err)
+		}
+		for productID, collections := range productCollections {
+			if product, exists := productMap[productID]; exists {
+				c := collections
+				product.Collections = &c
+			}
+		}
+		return nil
+	})
+
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	return products, nil
+}
+
+func (s *ProductServiceOp) fetchProductCollections(ctx context.Context, productIDs []string) (map[string]model.CollectionConnection, error) {
+	if len(productIDs) == 0 {
+		return make(map[string]model.CollectionConnection), nil
+	}
+
+	result := make(map[string]model.CollectionConnection)
+	const batchSize = 20
+
+	for i := 0; i < len(productIDs); i += batchSize {
+		end := min(i+batchSize, len(productIDs))
+
+		batch := productIDs[i:end]
+		batchResult, err := s.fetchProductCollectionsBatch(ctx, batch)
+		if err != nil {
+			return nil, fmt.Errorf("fetch product collections batch %d-%d: %w", i, end, err)
+		}
+
+		maps.Copy(result, batchResult)
+	}
+
+	return result, nil
+}
+
+func (s *ProductServiceOp) fetchProductCollectionsBatch(ctx context.Context, productIDs []string) (map[string]model.CollectionConnection, error) {
+	gqlIDs := make([]string, len(productIDs))
+	copy(gqlIDs, productIDs)
+
+	const collectionsQuery = `
+		collections(first: 100) {
+			edges {
+				node {
+					id
+					title
+					handle
+				}
+			}
+		}
+	`
+
+	query := `{
+		nodes(ids: [` + `"` + strings.Join(gqlIDs, `","`) + `"` + `]) {
+			... on Product {
+				id
+				` + collectionsQuery + `
+			}
+		}
+	}`
+
+	out := struct {
+		Nodes []struct {
+			ID          string                     `json:"id"`
+			Collections model.CollectionConnection `json:"collections"`
+		} `json:"nodes"`
+	}{}
+
+	err := s.executeGraphQLQueryWithRetry(ctx, query, nil, &out)
+	if err != nil {
+		return nil, fmt.Errorf("query product collections: %w", err)
+	}
+
+	result := make(map[string]model.CollectionConnection)
+	for _, node := range out.Nodes {
+		if node.ID != "" {
+			result[node.ID] = node.Collections
+		}
+	}
+
+	return result, nil
 }
 
 func (s *ProductServiceOp) fetchResourcePublications(ctx context.Context, productIDs []string) (map[string]model.ResourcePublicationConnection, error) {
@@ -827,7 +945,7 @@ func (s *ProductServiceOp) fetchResourcePublications(ctx context.Context, produc
 	}
 
 	result := make(map[string]model.ResourcePublicationConnection)
-	const batchSize = 30
+	const batchSize = 20
 
 	for i := 0; i < len(productIDs); i += batchSize {
 		end := min(i+batchSize, len(productIDs))
@@ -880,6 +998,10 @@ func (s *ProductServiceOp) fetchResourcePublicationsBatch(ctx context.Context, p
 		} `json:"nodes"`
 	}{}
 
+	// Estimate cost: 1 + len(ids) * (1 + 30)
+	cost := 1 + len(productIDs)*31
+	ctx = graphqlclient.WithEstimatedCost(ctx, cost)
+
 	err := s.executeGraphQLQueryWithRetry(ctx, query, nil, &out)
 	if err != nil {
 		return nil, fmt.Errorf("query resource publications: %w", err)
@@ -901,7 +1023,7 @@ func (s *ProductServiceOp) fetchProductMetafields(ctx context.Context, productID
 	}
 
 	result := make(map[string]model.MetafieldConnection)
-	const batchSize = 10
+	const batchSize = 20
 
 	for i := 0; i < len(productIDs); i += batchSize {
 		end := min(i+batchSize, len(productIDs))
@@ -1022,6 +1144,10 @@ func (s *ProductServiceOp) fetchProductMetafieldsBatch(ctx context.Context, prod
 			} `json:"metafields"`
 		} `json:"nodes"`
 	}{}
+
+	// Estimate cost: 1 + len(ids) * (1 + 100)
+	cost := 1 + len(productIDs)*101
+	ctx = graphqlclient.WithEstimatedCost(ctx, cost)
 
 	err := s.executeGraphQLQueryWithRetry(ctx, query, nil, &out)
 	if err != nil {
@@ -1165,6 +1291,10 @@ func (s *ProductServiceOp) fetchBundleComponentsBatch(ctx context.Context, produ
 			BundleComponents model.ProductBundleComponentConnection `json:"bundleComponents"`
 		} `json:"nodes"`
 	}{}
+
+	// Estimate cost: 1 + len(ids) * (1 + 100)
+	cost := 1 + len(productIDs)*101
+	ctx = graphqlclient.WithEstimatedCost(ctx, cost)
 
 	err := s.executeGraphQLQueryWithRetry(ctx, query, nil, &out)
 	if err != nil {

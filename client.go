@@ -84,18 +84,22 @@ func NewClientWithToken(accessToken string, storeName string, opts ...Option) *C
 }
 
 func newShopifyGraphQLClientWithBasicAuth(apiKey string, accessToken string, storeName string) *graphql.Client {
+	rateLimiter := graphqlclient.NewRateLimiter(0)
 	opts := []graphqlclient.Option{
 		graphqlclient.WithVersion(defaultShopifyAPIVersion),
 		graphqlclient.WithPrivateAppAuth(apiKey, accessToken),
+		graphqlclient.WithRateLimiter(rateLimiter),
 	}
 
 	return graphqlclient.NewClient(storeName, opts...)
 }
 
 func newShopifyGraphQLClientWithToken(accessToken string, storeName string) *graphql.Client {
+	rateLimiter := graphqlclient.NewRateLimiter(0)
 	opts := []graphqlclient.Option{
 		graphqlclient.WithVersion(defaultShopifyAPIVersion),
 		graphqlclient.WithToken(accessToken),
+		graphqlclient.WithRateLimiter(rateLimiter),
 	}
 
 	return graphqlclient.NewClient(storeName, opts...)

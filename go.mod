@@ -10,6 +10,7 @@ require (
 	github.com/r0busta/graphql v1.2.0
 	github.com/sirupsen/logrus v1.9.3
 	github.com/stretchr/testify v1.10.0
+	golang.org/x/sync v0.8.0
 	gopkg.in/guregu/null.v4 v4.0.0
 )
 
