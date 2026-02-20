@@ -14,7 +14,7 @@ type contextKey string
 
 const (
 	// DefaultThreshold is the default safety margin.
-	// If remaining capacity is below this, we wait.
+	// If estimated usage crosses this threshold, we wait.
 	// Shopify limit is usually 40 points/sec bucket size 1000 (standard) or 80/2000 (plus).
 	// We want to stop when we have used e.g. 1300 out of 2000.
 	DefaultUsageThresholdRatio = 0.65 // Use up to 65% of the limit.
@@ -29,10 +29,9 @@ func WithEstimatedCost(ctx context.Context, cost int) context.Context {
 type RateLimiter struct {
 	mu sync.Mutex
 
-	limit     int
-	baseUsed  int // Usage reported by the server (from headers)
-	pending   int // Estimated cost of in-flight requests
-	remaining int
+	limit    int
+	baseUsed int // Usage reported by the server (from headers)
+	pending  int // Estimated cost of in-flight requests
 
 	ratio float64
 }
@@ -44,8 +43,7 @@ func NewRateLimiter(ratio float64) *RateLimiter {
 	return &RateLimiter{
 		ratio: ratio,
 		// Initial safe values until we get first header
-		limit:     1000, // Assume Standard for safety. Let's start conservative.
-		remaining: 1000,
+		limit: 1000, // Assume Standard for safety. Let's start conservative.
 	}
 }
 
@@ -130,10 +128,13 @@ func (r *RateLimiter) Update(header string) {
 		return
 	}
 
+	if limit < 1000 {
+		return
+	}
+
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.baseUsed = used
 	r.limit = limit
-	r.remaining = limit - used
 }

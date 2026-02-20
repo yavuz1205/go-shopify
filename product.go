@@ -4,13 +4,17 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/r0busta/go-shopify-graphql-model/v4/graph/model"
-	graphqlclient "github.com/yavuz1205/go-shopify/graphql"
 	"golang.org/x/sync/errgroup"
 )
+
+var retryAfterPattern = regexp.MustCompile(`retry_after=([0-9]+(?:\.[0-9]+)?)s`)
 
 //go:generate mockgen -destination=./mock/product_service.go -package=mock . ProductService
 type ProductService interface {
@@ -381,28 +385,79 @@ func (s *ProductServiceOp) Create(ctx context.Context, product model.ProductCrea
 }
 
 func (s *ProductServiceOp) executeGraphQLQueryWithRetry(ctx context.Context, query string, vars map[string]interface{}, out interface{}) error {
-	var err error
-	maxRetries := 10             // Increased from 5
-	baseDelay := 1 * time.Second // Increased from 200ms
+	const (
+		maxRetries       = 12
+		baseDelay        = 500 * time.Millisecond
+		maxDelay         = 8 * time.Second
+		minThrottleDelay = 1 * time.Second
+	)
 
+	var err error
 	for i := 0; i < maxRetries; i++ {
 		err = s.client.gql.QueryString(ctx, query, vars, out)
 		if err == nil {
 			return nil
 		}
 
-		if strings.Contains(err.Error(), "Throttled") || strings.Contains(err.Error(), "Cost limit exceeded") {
-			delay := baseDelay * time.Duration(1<<i)
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(delay):
-				continue
-			}
+		if !isRetriableThrottleError(err) {
+			return err
 		}
-		return err
+
+		delay, hasServerHint := retryDelayFromError(err)
+		if hasServerHint {
+			delay = min(max(delay, minThrottleDelay), maxDelay)
+		} else {
+			delay = min(baseDelay*time.Duration(1<<i), maxDelay)
+		}
+		if delay <= 0 {
+			delay = baseDelay
+		}
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delay):
+			continue
+		}
 	}
 	return err
+}
+
+func isRetriableThrottleError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	msg := strings.ToLower(err.Error())
+
+	// Cost-shape errors are not transient and should fail fast.
+	if strings.Contains(msg, "max_cost_exceeded") ||
+		strings.Contains(msg, "max cost exceeded") ||
+		strings.Contains(msg, "single query max cost limit") {
+		return false
+	}
+
+	return strings.Contains(msg, "throttled") ||
+		strings.Contains(msg, "cost limit exceeded") ||
+		strings.Contains(msg, "rate limit")
+}
+
+func retryDelayFromError(err error) (time.Duration, bool) {
+	if err == nil {
+		return 0, false
+	}
+
+	match := retryAfterPattern.FindStringSubmatch(strings.ToLower(err.Error()))
+	if len(match) != 2 {
+		return 0, false
+	}
+
+	seconds, parseErr := strconv.ParseFloat(match[1], 64)
+	if parseErr != nil || seconds <= 0 {
+		return 0, false
+	}
+
+	return time.Duration(seconds * float64(time.Second)), true
 }
 
 func (s *ProductServiceOp) Update(ctx context.Context, product model.ProductUpdateInput, media []model.CreateMediaInput) error {
@@ -526,18 +581,35 @@ func (s *ProductServiceOp) FetchVariantMetafields(ctx context.Context, variantID
 	}
 
 	result := make(map[string][]model.Metafield)
-	const batchSize = 5
+	const (
+		batchSize            = 5
+		maxConcurrentBatches = 2
+	)
+
+	var mu sync.Mutex
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(maxConcurrentBatches)
 
 	for i := 0; i < len(variantIDs); i += batchSize {
+		start := i
 		end := min(i+batchSize, len(variantIDs))
+		batch := append([]string(nil), variantIDs[start:end]...)
 
-		batch := variantIDs[i:end]
-		batchResult, err := s.fetchVariantMetafieldsBatch(ctx, batch)
-		if err != nil {
-			return nil, fmt.Errorf("fetch batch %d-%d: %w", i, end, err)
-		}
+		g.Go(func() error {
+			batchResult, err := s.fetchVariantMetafieldsBatch(ctx, batch)
+			if err != nil {
+				return fmt.Errorf("fetch batch %d-%d: %w", start, end, err)
+			}
 
-		maps.Copy(result, batchResult)
+			mu.Lock()
+			maps.Copy(result, batchResult)
+			mu.Unlock()
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	return result, nil
@@ -648,11 +720,6 @@ func (s *ProductServiceOp) fetchVariantMetafieldsBatch(ctx context.Context, vari
 			} `json:"metafields"`
 		} `json:"nodes"`
 	}{}
-
-	// Estimate cost: 1 (base) + len(ids) * (1 + 100 (metafields))
-	// This is a rough upper bound.
-	cost := 1 + len(variantIDs)*101
-	ctx = graphqlclient.WithEstimatedCost(ctx, cost)
 
 	err := s.executeGraphQLQueryWithRetry(ctx, query, nil, &out)
 	if err != nil {
@@ -975,6 +1042,8 @@ func (s *ProductServiceOp) fetchResourcePublicationsBatch(ctx context.Context, p
 						id
 						app {
 							id
+							handle
+							title
 						}
 					}
 				}
@@ -997,10 +1066,6 @@ func (s *ProductServiceOp) fetchResourcePublicationsBatch(ctx context.Context, p
 			ResourcePublications model.ResourcePublicationConnection `json:"resourcePublications"`
 		} `json:"nodes"`
 	}{}
-
-	// Estimate cost: 1 + len(ids) * (1 + 30)
-	cost := 1 + len(productIDs)*31
-	ctx = graphqlclient.WithEstimatedCost(ctx, cost)
 
 	err := s.executeGraphQLQueryWithRetry(ctx, query, nil, &out)
 	if err != nil {
@@ -1145,10 +1210,6 @@ func (s *ProductServiceOp) fetchProductMetafieldsBatch(ctx context.Context, prod
 		} `json:"nodes"`
 	}{}
 
-	// Estimate cost: 1 + len(ids) * (1 + 100)
-	cost := 1 + len(productIDs)*101
-	ctx = graphqlclient.WithEstimatedCost(ctx, cost)
-
 	err := s.executeGraphQLQueryWithRetry(ctx, query, nil, &out)
 	if err != nil {
 		return nil, fmt.Errorf("query product metafields: %w", err)
@@ -1292,10 +1353,6 @@ func (s *ProductServiceOp) fetchBundleComponentsBatch(ctx context.Context, produ
 		} `json:"nodes"`
 	}{}
 
-	// Estimate cost: 1 + len(ids) * (1 + 100)
-	cost := 1 + len(productIDs)*101
-	ctx = graphqlclient.WithEstimatedCost(ctx, cost)
-
 	err := s.executeGraphQLQueryWithRetry(ctx, query, nil, &out)
 	if err != nil {
 		return nil, fmt.Errorf("query bundle components: %w", err)
@@ -1317,16 +1374,35 @@ func (s *ProductServiceOp) fetchInventoryLevels(ctx context.Context, variantIDs 
 	}
 
 	result := make(map[string]model.InventoryLevelConnection)
-	const batchSize = 10
+	const (
+		batchSize            = 10
+		maxConcurrentBatches = 2
+	)
+
+	var mu sync.Mutex
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(maxConcurrentBatches)
 
 	for i := 0; i < len(variantIDs); i += batchSize {
+		start := i
 		end := min(i+batchSize, len(variantIDs))
-		batch := variantIDs[i:end]
-		batchResult, err := s.fetchInventoryLevelsBatch(ctx, batch)
-		if err != nil {
-			return nil, fmt.Errorf("fetch inventory levels batch %d-%d: %w", i, end, err)
-		}
-		maps.Copy(result, batchResult)
+		batch := append([]string(nil), variantIDs[start:end]...)
+
+		g.Go(func() error {
+			batchResult, err := s.fetchInventoryLevelsBatch(ctx, batch)
+			if err != nil {
+				return fmt.Errorf("fetch inventory levels batch %d-%d: %w", start, end, err)
+			}
+
+			mu.Lock()
+			maps.Copy(result, batchResult)
+			mu.Unlock()
+			return nil
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		return nil, err
 	}
 
 	return result, nil
@@ -1337,18 +1413,19 @@ func (s *ProductServiceOp) fetchInventoryLevelsBatch(ctx context.Context, varian
 	copy(gqlIDs, variantIDs)
 
 	const inventoryLevelsQuery = `
-		inventoryLevels(first: 10) {
-			edges {
-				node {
-					id
-					location {
+			inventoryLevels(first: 10) {
+				edges {
+					node {
 						id
-						name
-					}
-					quantities(names: ["available"]) {
-						id
-						name
-						quantity
+						location {
+							id
+							name
+							shipsInventory
+						}
+						quantities(names: ["available"]) {
+							id
+							name
+							quantity
 					}
 				}
 			}
